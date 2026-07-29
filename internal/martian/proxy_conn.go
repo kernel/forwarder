@@ -41,13 +41,18 @@ type proxyConn struct {
 	conn   net.Conn
 	secure bool
 	cs     tls.ConnectionState
+	// rec taps the plaintext request stream feeding brw to recover client
+	// header order, which http.ReadRequest discards.
+	rec *headerOrderRecorder
 }
 
 func newProxyConn(p *Proxy, conn net.Conn) *proxyConn {
+	rec := newHeaderOrderRecorder(conn)
 	return &proxyConn{
 		Proxy: p,
-		brw:   bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn)),
+		brw:   bufio.NewReadWriter(bufio.NewReader(rec), bufio.NewWriter(conn)),
 		conn:  conn,
+		rec:   rec,
 	}
 }
 
@@ -81,6 +86,10 @@ func (p *proxyConn) readRequest() (*http.Request, error) {
 	if deadlineErr := p.conn.SetReadDeadline(idleDeadline); deadlineErr != nil {
 		log.Error(context.TODO(), "can't set idle deadline", "error", deadlineErr)
 	}
+
+	// Start recording header order before the readability probe below, which
+	// is what triggers the read that carries the head.
+	p.rec.arm()
 
 	// Wait for the connection to become readable before trying to
 	// read the next request. This prevents a ReadHeaderTimeout or
@@ -121,6 +130,10 @@ func (p *proxyConn) readRequest() (*http.Request, error) {
 	}
 
 	req = req.WithContext(withTraceID(p.BaseContext, newTraceID(req.Header.Get(p.RequestIDHeader))))
+
+	if order := p.rec.recorded(req); order != nil {
+		req = req.WithContext(WithHeaderOrder(req.Context(), order))
+	}
 
 	// Adjust the read deadline if necessary.
 	if !hdrDeadline.Equal(wholeReqDeadline) {
@@ -208,8 +221,9 @@ func (p *proxyConn) handleMITM(req *http.Request) error {
 			return p.MITMConfig.H2Config().Proxy(p.closeCh, tlsconn, req.URL)
 		}
 
+		p.rec.reset(tlsconn)
 		p.brw.Writer.Reset(tlsconn)
-		p.brw.Reader.Reset(tlsconn)
+		p.brw.Reader.Reset(p.rec)
 
 		p.conn = tlsconn
 		p.secure = true
@@ -219,7 +233,8 @@ func (p *proxyConn) handleMITM(req *http.Request) error {
 	}
 
 	// Prepend the previously read data to be read again by http.ReadRequest.
-	p.brw.Reader.Reset(io.MultiReader(bytes.NewReader(buf), p.conn))
+	p.rec.reset(io.MultiReader(bytes.NewReader(buf), p.conn))
+	p.brw.Reader.Reset(p.rec)
 	return nil
 }
 
