@@ -82,6 +82,14 @@ type (
 // that the CONNECT request should be handled by martian.
 var ErrConnectFallback = martian.ErrConnectFallback
 
+// HeaderOrder returns the header names of req in the order the client sent
+// them on the wire, lowercased. It returns nil when the order is unavailable,
+// e.g. for requests served through the http.Handler implementation, which
+// parses via net/http and discards order.
+func HeaderOrder(req *http.Request) []string {
+	return martian.ContextHeaderOrder(req.Context())
+}
+
 type HTTPProxyConfig struct {
 	HTTPServerConfig
 

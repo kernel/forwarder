@@ -106,6 +106,11 @@ func (p *proxyConn) readRequest() (*http.Request, error) {
 		log.Error(context.TODO(), "can't set read header deadline", "error", deadlineErr)
 	}
 
+	// Record the header names in wire order before the stdlib parse, which
+	// would discard order. captureRequestHeaderOrder rewinds the stream, so
+	// http.ReadRequest below sees the same bytes it would have without it.
+	order := p.captureRequestHeaderOrder()
+
 	req, err := http.ReadRequest(p.brw.Reader)
 	if err != nil {
 		return nil, err
@@ -121,6 +126,9 @@ func (p *proxyConn) readRequest() (*http.Request, error) {
 	}
 
 	req = req.WithContext(withTraceID(p.BaseContext, newTraceID(req.Header.Get(p.RequestIDHeader))))
+	if len(order) > 0 {
+		req = req.WithContext(withHeaderOrder(req.Context(), order))
+	}
 
 	// Adjust the read deadline if necessary.
 	if !hdrDeadline.Equal(wholeReqDeadline) {
@@ -130,6 +138,66 @@ func (p *proxyConn) readRequest() (*http.Request, error) {
 	}
 
 	return req, nil
+}
+
+// captureRequestHeaderOrder reads the request head from the connection's
+// buffered reader, records the header names in wire order, and rewinds the
+// stream so the caller's http.ReadRequest parses the same bytes. It returns
+// nil when the head is malformed or incomplete, leaving the stream rewound to
+// the head start so the subsequent parse fails exactly as it would have.
+func (p *proxyConn) captureRequestHeaderOrder() []string {
+	br := p.brw.Reader
+	var (
+		head    bytes.Buffer
+		order   []string
+		pending []byte // carries a line fragment when ReadSlice hits ErrBufferFull
+		first   = true
+	)
+	replay := func() {
+		// Keep any bytes already buffered behind the head (e.g. the start of a
+		// request body) and prepend the head, so http.ReadRequest re-reads the
+		// original byte stream verbatim.
+		extra, _ := br.Peek(br.Buffered())
+		br.Reset(io.MultiReader(
+			bytes.NewReader(head.Bytes()),
+			bytes.NewReader(append([]byte(nil), extra...)),
+			p.conn,
+		))
+	}
+	for {
+		line, err := br.ReadSlice('\n')
+		head.Write(line)
+		if errors.Is(err, bufio.ErrBufferFull) {
+			pending = append(pending, line...)
+			continue
+		}
+		if err != nil {
+			replay()
+			return nil
+		}
+		if pending != nil {
+			line = append(pending, line...)
+			pending = nil
+		}
+		if first {
+			first = false // request line
+			continue
+		}
+		trimmed := bytes.TrimRight(line, "\r\n")
+		if len(trimmed) == 0 {
+			break // blank line: end of the head
+		}
+		if trimmed[0] == ' ' || trimmed[0] == '\t' {
+			continue // obs-fold continuation of the previous header
+		}
+		if i := bytes.IndexByte(trimmed, ':'); i > 0 {
+			if name := bytes.TrimSpace(trimmed[:i]); len(name) > 0 {
+				order = append(order, strings.ToLower(string(name)))
+			}
+		}
+	}
+	replay()
+	return order
 }
 
 func (p *proxyConn) handleMITM(req *http.Request) error {
