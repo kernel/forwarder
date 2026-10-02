@@ -42,8 +42,9 @@ func withHeaderOrder(ctx context.Context, order []string) context.Context {
 }
 
 // ContextHeaderOrder returns the header names of a request as they appeared on
-// the wire, in order, or nil when the request was not read by the connection
-// loop that captures order (e.g. an http.Handler-served request).
+// the wire, in order and with their original casing, or nil when the request
+// was not read by the connection loop that captures order (e.g. an
+// http.Handler-served request).
 func ContextHeaderOrder(ctx context.Context) []string {
 	order, _ := ctx.Value(headerOrderContextKey).([]string)
 	return order

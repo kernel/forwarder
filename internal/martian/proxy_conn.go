@@ -192,7 +192,12 @@ func (p *proxyConn) captureRequestHeaderOrder() []string {
 		}
 		if i := bytes.IndexByte(trimmed, ':'); i > 0 {
 			if name := bytes.TrimSpace(trimmed[:i]); len(name) > 0 {
-				order = append(order, strings.ToLower(string(name)))
+				// Preserve the wire casing: HTTP/1.1 names are case-insensitive but
+				// real clients fingerprint distinctly (Chrome sends sec-ch-ua and
+				// client hints lowercase, everything else canonicalized), and a
+			// re-originating proxy must emit the bytes the client sent. The
+				// consumer lowercases for matching; the casing is the point.
+				order = append(order, string(name))
 			}
 		}
 	}
