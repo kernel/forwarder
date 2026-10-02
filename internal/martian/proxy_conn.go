@@ -109,7 +109,11 @@ func (p *proxyConn) readRequest() (*http.Request, error) {
 	// Record the header names in wire order before the stdlib parse, which
 	// would discard order. captureRequestHeaderOrder rewinds the stream, so
 	// http.ReadRequest below sees the same bytes it would have without it.
-	order := p.captureRequestHeaderOrder()
+	// A head too large to retain cannot be rewound, so the request fails.
+	order, err := p.captureRequestHeaderOrder()
+	if err != nil {
+		return nil, err
+	}
 
 	req, err := http.ReadRequest(p.brw.Reader)
 	if err != nil {
@@ -140,12 +144,29 @@ func (p *proxyConn) readRequest() (*http.Request, error) {
 	return req, nil
 }
 
+// maxCapturedHeadBytes bounds the memory the order capture retains per
+// connection while reading a request head: the head buffer plus any
+// ErrBufferFull fragment. A client streaming an unbounded head — no blank
+// line, or one giant line — would otherwise grow that memory until the read
+// deadline. net/http's http.Server caps the requests it accepts at the same
+// DefaultMaxHeaderBytes limit, and a head past it is not something a real
+// client sends, so the request fails like a malformed one.
+const maxCapturedHeadBytes = 1 << 20 // net/http.DefaultMaxHeaderBytes
+
+// errCapturedHeadTooLarge is returned by readRequest when the order capture
+// consumed more head bytes than it can retain and rewind. The stream cannot
+// be replayed from that point, so the request is failed rather than parsed
+// from a truncated head.
+var errCapturedHeadTooLarge = errors.New("request head too large to capture")
+
 // captureRequestHeaderOrder reads the request head from the connection's
 // buffered reader, records the header names in wire order, and rewinds the
 // stream so the caller's http.ReadRequest parses the same bytes. It returns
 // nil when the head is malformed or incomplete, leaving the stream rewound to
-// the head start so the subsequent parse fails exactly as it would have.
-func (p *proxyConn) captureRequestHeaderOrder() []string {
+// the head start so the subsequent parse fails exactly as it would have, and
+// an error when the head exceeds maxCapturedHeadBytes, in which case the
+// consumed bytes cannot be rewound and the request must fail.
+func (p *proxyConn) captureRequestHeaderOrder() ([]string, error) {
 	br := p.brw.Reader
 	var (
 		head    bytes.Buffer
@@ -167,13 +188,22 @@ func (p *proxyConn) captureRequestHeaderOrder() []string {
 	for {
 		line, err := br.ReadSlice('\n')
 		head.Write(line)
-		if errors.Is(err, bufio.ErrBufferFull) {
+		fragment := errors.Is(err, bufio.ErrBufferFull)
+		if fragment {
 			pending = append(pending, line...)
-			continue
-		}
-		if err != nil {
+		} else if err != nil {
+			// Incomplete head: rewind so the caller's parse fails on the same
+			// truncated bytes.
 			replay()
-			return nil
+			return nil, nil
+		}
+		// head carries every byte of the head and pending duplicates the
+		// ErrBufferFull fragments, so both count toward the retained total.
+		if head.Len()+len(pending) > maxCapturedHeadBytes {
+			return nil, errCapturedHeadTooLarge
+		}
+		if fragment {
+			continue
 		}
 		if pending != nil {
 			line = append(pending, line...)
@@ -197,7 +227,7 @@ func (p *proxyConn) captureRequestHeaderOrder() []string {
 		}
 	}
 	replay()
-	return order
+	return order, nil
 }
 
 func (p *proxyConn) handleMITM(req *http.Request) error {

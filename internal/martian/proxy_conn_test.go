@@ -9,6 +9,7 @@ package martian
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -17,13 +18,15 @@ import (
 	"time"
 )
 
-func newTestProxyConn(t *testing.T, data []byte, closeAfter bool) *proxyConn {
+func newTestProxyConn(t *testing.T, data []byte, closeAfter, followUp bool) *proxyConn {
 	t.Helper()
 	client, srv := net.Pipe()
 	t.Cleanup(func() { client.Close(); srv.Close() })
 	go func() {
 		_, _ = client.Write(data)
-		_, _ = client.Write([]byte("NEXT REQUEST\r\n")) // follow-up data after replay
+		if followUp {
+			_, _ = client.Write([]byte("NEXT REQUEST\r\n")) // follow-up data after replay
+		}
 		if closeAfter {
 			_ = client.Close()
 		}
@@ -54,7 +57,7 @@ func TestReadRequestCapturesHeaderOrder(t *testing.T) {
 		"cookie: a=1\r\n" +
 		"cookie: b=2\r\n" +
 		"\r\n"
-	pc := newTestProxyConn(t, []byte(raw), false)
+	pc := newTestProxyConn(t, []byte(raw), false, true)
 	req := readRequestOrFatal(t, pc)
 
 	if got := ContextHeaderOrder(req.Context()); !equalStrings(got, []string{
@@ -84,7 +87,7 @@ func TestReadRequestHeaderOrderWithBody(t *testing.T) {
 		"X-Second: 2\r\n" +
 		"\r\n" +
 		"hello"
-	pc := newTestProxyConn(t, []byte(raw), false)
+	pc := newTestProxyConn(t, []byte(raw), false, true)
 	req := readRequestOrFatal(t, pc)
 
 	if got := ContextHeaderOrder(req.Context()); !equalStrings(got, []string{"host", "content-length", "x-first", "x-second"}) {
@@ -108,7 +111,7 @@ func TestReadRequestHeaderOrderLongLine(t *testing.T) {
 		"Cookie: " + long + "\r\n" +
 		"X-After: 1\r\n" +
 		"\r\n"
-	pc := newTestProxyConn(t, []byte(raw), false)
+	pc := newTestProxyConn(t, []byte(raw), false, true)
 	req := readRequestOrFatal(t, pc)
 
 	if got := ContextHeaderOrder(req.Context()); !equalStrings(got, []string{"host", "cookie", "x-after"}) {
@@ -120,12 +123,45 @@ func TestReadRequestHeaderOrderLongLine(t *testing.T) {
 }
 
 func TestReadRequestHeaderOrderMalformedHead(t *testing.T) {
-	// Truncated head: order capture gives up, the parse must fail as usual.
+	// Truncated head with nothing behind it: order capture gives up and the
+	// parse fails on the truncated bytes themselves, not on follow-up data.
 	raw := "GET / HTTP/1.1\r\nHost: x\r\n"
-	pc := newTestProxyConn(t, []byte(raw), true)
+	pc := newTestProxyConn(t, []byte(raw), true, false)
 	pc.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if _, err := pc.readRequest(); err == nil {
 		t.Fatal("expected parse error for truncated head")
+	}
+}
+
+func TestReadRequestHeaderOrderOversizedHead(t *testing.T) {
+	// A head beyond maxCapturedHeadBytes cannot be rewound, so the request
+	// fails instead of the capture retaining an unbounded buffer. The pipe
+	// never finishes writing, exercising the bound rather than the deadline.
+	big := "X-Big: " + strings.Repeat("a", 2*maxCapturedHeadBytes) + "\r\n"
+	raw := "GET / HTTP/1.1\r\n" + big
+	client, srv := net.Pipe()
+	t.Cleanup(func() { client.Close(); srv.Close() })
+	go func() {
+		// Write in chunks without ever closing; the reader must give up on
+		// the bound, not wait for the stream to end.
+		buf := []byte(raw)
+		for len(buf) > 0 {
+			n, _ := client.Write(buf)
+			if n <= 0 {
+				return
+			}
+			buf = buf[n:]
+		}
+	}()
+	pc := &proxyConn{
+		Proxy: &Proxy{BaseContext: context.Background()},
+		brw:   bufio.NewReadWriter(bufio.NewReader(srv), bufio.NewWriter(srv)),
+		conn:  srv,
+	}
+	pc.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, err := pc.readRequest()
+	if !errors.Is(err, errCapturedHeadTooLarge) {
+		t.Fatalf("readRequest error = %v, want errCapturedHeadTooLarge", err)
 	}
 }
 
