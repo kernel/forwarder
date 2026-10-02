@@ -61,9 +61,15 @@ func TestReadRequestCapturesHeaderOrder(t *testing.T) {
 	req := readRequestOrFatal(t, pc)
 
 	if got := ContextHeaderOrder(req.Context()); !equalStrings(got, []string{
-		"host", "cache-control", "sec-ch-ua", "user-agent", "cookie", "cookie",
+		"Host", "Cache-Control", "sec-ch-ua", "User-Agent", "cookie", "cookie",
 	}) {
-		t.Errorf("header order = %v, want [host cache-control sec-ch-ua user-agent cookie cookie]", got)
+		t.Errorf("header order = %v, want [Host Cache-Control sec-ch-ua User-Agent cookie cookie]", got)
+	}
+	// Casing is preserved verbatim — the consumer re-originates the header
+	// block and must emit the bytes the client sent, and Go's parser would
+	// otherwise canonicalize sec-ch-ua to Sec-Ch-Ua.
+	if name := ContextHeaderOrder(req.Context())[2]; name != "sec-ch-ua" {
+		t.Errorf("captured casing = %q, want %q", name, "sec-ch-ua")
 	}
 	if req.Host != "example.com" || req.Header.Get("User-Agent") != "Test/1.0" || len(req.Header.Values("cookie")) != 2 {
 		t.Errorf("request not parsed correctly: %+v", req)
@@ -85,13 +91,14 @@ func TestReadRequestHeaderOrderWithBody(t *testing.T) {
 		"Content-Length: 5\r\n" +
 		"X-First: 1\r\n" +
 		"X-Second: 2\r\n" +
+		"dpr: 1\r\n" +
 		"\r\n" +
 		"hello"
 	pc := newTestProxyConn(t, []byte(raw), false, true)
 	req := readRequestOrFatal(t, pc)
 
-	if got := ContextHeaderOrder(req.Context()); !equalStrings(got, []string{"host", "content-length", "x-first", "x-second"}) {
-		t.Errorf("header order = %v, want [host content-length x-first x-second]", got)
+	if got := ContextHeaderOrder(req.Context()); !equalStrings(got, []string{"Host", "Content-Length", "X-First", "X-Second", "dpr"}) {
+		t.Errorf("header order = %v, want [Host Content-Length X-First X-Second dpr]", got)
 	}
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
@@ -114,8 +121,8 @@ func TestReadRequestHeaderOrderLongLine(t *testing.T) {
 	pc := newTestProxyConn(t, []byte(raw), false, true)
 	req := readRequestOrFatal(t, pc)
 
-	if got := ContextHeaderOrder(req.Context()); !equalStrings(got, []string{"host", "cookie", "x-after"}) {
-		t.Errorf("header order = %v, want [host cookie x-after]", got)
+	if got := ContextHeaderOrder(req.Context()); !equalStrings(got, []string{"Host", "Cookie", "X-After"}) {
+		t.Errorf("header order = %v, want [Host Cookie X-After]", got)
 	}
 	if got := req.Header.Get("Cookie"); got != long {
 		t.Errorf("cookie value not parsed intact (len=%d, want %d)", len(got), len(long))
