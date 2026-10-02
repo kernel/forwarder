@@ -23,6 +23,7 @@ type contextKey int
 
 const (
 	traceIDContextKey contextKey = iota
+	headerOrderContextKey
 )
 
 func withTraceID(ctx context.Context, id traceID) context.Context {
@@ -34,6 +35,18 @@ func ContextTraceID(ctx context.Context) string {
 		return v.(traceID).id
 	}
 	return ""
+}
+
+func withHeaderOrder(ctx context.Context, order []string) context.Context {
+	return context.WithValue(ctx, headerOrderContextKey, order)
+}
+
+// ContextHeaderOrder returns the header names of a request as they appeared on
+// the wire, in order, or nil when the request was not read by the connection
+// loop that captures order (e.g. an http.Handler-served request).
+func ContextHeaderOrder(ctx context.Context) []string {
+	order, _ := ctx.Value(headerOrderContextKey).([]string)
+	return order
 }
 
 func ContextDuration(ctx context.Context) time.Duration {

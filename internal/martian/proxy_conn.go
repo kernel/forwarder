@@ -106,6 +106,15 @@ func (p *proxyConn) readRequest() (*http.Request, error) {
 		log.Error(context.TODO(), "can't set read header deadline", "error", deadlineErr)
 	}
 
+	// Record the header names in wire order before the stdlib parse, which
+	// would discard order. captureRequestHeaderOrder rewinds the stream, so
+	// http.ReadRequest below sees the same bytes it would have without it.
+	// A head too large to retain cannot be rewound, so the request fails.
+	order, err := p.captureRequestHeaderOrder()
+	if err != nil {
+		return nil, err
+	}
+
 	req, err := http.ReadRequest(p.brw.Reader)
 	if err != nil {
 		return nil, err
@@ -121,6 +130,9 @@ func (p *proxyConn) readRequest() (*http.Request, error) {
 	}
 
 	req = req.WithContext(withTraceID(p.BaseContext, newTraceID(req.Header.Get(p.RequestIDHeader))))
+	if len(order) > 0 {
+		req = req.WithContext(withHeaderOrder(req.Context(), order))
+	}
 
 	// Adjust the read deadline if necessary.
 	if !hdrDeadline.Equal(wholeReqDeadline) {
@@ -130,6 +142,92 @@ func (p *proxyConn) readRequest() (*http.Request, error) {
 	}
 
 	return req, nil
+}
+
+// maxCapturedHeadBytes bounds the memory the order capture retains per
+// connection while reading a request head: the head buffer plus any
+// ErrBufferFull fragment. A client streaming an unbounded head — no blank
+// line, or one giant line — would otherwise grow that memory until the read
+// deadline. net/http's http.Server caps the requests it accepts at the same
+// DefaultMaxHeaderBytes limit, and a head past it is not something a real
+// client sends, so the request fails like a malformed one.
+const maxCapturedHeadBytes = 1 << 20 // net/http.DefaultMaxHeaderBytes
+
+// errCapturedHeadTooLarge is returned by readRequest when the order capture
+// consumed more head bytes than it can retain and rewind. The stream cannot
+// be replayed from that point, so the request is failed rather than parsed
+// from a truncated head.
+var errCapturedHeadTooLarge = errors.New("request head too large to capture")
+
+// captureRequestHeaderOrder reads the request head from the connection's
+// buffered reader, records the header names in wire order, and rewinds the
+// stream so the caller's http.ReadRequest parses the same bytes. It returns
+// nil when the head is malformed or incomplete, leaving the stream rewound to
+// the head start so the subsequent parse fails exactly as it would have, and
+// an error when the head exceeds maxCapturedHeadBytes, in which case the
+// consumed bytes cannot be rewound and the request must fail.
+func (p *proxyConn) captureRequestHeaderOrder() ([]string, error) {
+	br := p.brw.Reader
+	var (
+		head    bytes.Buffer
+		order   []string
+		pending []byte // carries a line fragment when ReadSlice hits ErrBufferFull
+		first   = true
+	)
+	replay := func() {
+		// Keep any bytes already buffered behind the head (e.g. the start of a
+		// request body) and prepend the head, so http.ReadRequest re-reads the
+		// original byte stream verbatim.
+		extra, _ := br.Peek(br.Buffered())
+		br.Reset(io.MultiReader(
+			bytes.NewReader(head.Bytes()),
+			bytes.NewReader(append([]byte(nil), extra...)),
+			p.conn,
+		))
+	}
+	for {
+		line, err := br.ReadSlice('\n')
+		head.Write(line)
+		fragment := errors.Is(err, bufio.ErrBufferFull)
+		if fragment {
+			pending = append(pending, line...)
+		} else if err != nil {
+			// Incomplete head: rewind so the caller's parse fails on the same
+			// truncated bytes.
+			replay()
+			return nil, nil
+		}
+		// head carries every byte of the head and pending duplicates the
+		// ErrBufferFull fragments, so both count toward the retained total.
+		if head.Len()+len(pending) > maxCapturedHeadBytes {
+			return nil, errCapturedHeadTooLarge
+		}
+		if fragment {
+			continue
+		}
+		if pending != nil {
+			line = append(pending, line...)
+			pending = nil
+		}
+		if first {
+			first = false // request line
+			continue
+		}
+		trimmed := bytes.TrimRight(line, "\r\n")
+		if len(trimmed) == 0 {
+			break // blank line: end of the head
+		}
+		if trimmed[0] == ' ' || trimmed[0] == '\t' {
+			continue // obs-fold continuation of the previous header
+		}
+		if i := bytes.IndexByte(trimmed, ':'); i > 0 {
+			if name := bytes.TrimSpace(trimmed[:i]); len(name) > 0 {
+				order = append(order, strings.ToLower(string(name)))
+			}
+		}
+	}
+	replay()
+	return order, nil
 }
 
 func (p *proxyConn) handleMITM(req *http.Request) error {
