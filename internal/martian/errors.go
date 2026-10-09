@@ -25,7 +25,6 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
-	_ "unsafe" // for go:linkname
 )
 
 var errClose = errors.New("closing connection")
@@ -37,14 +36,9 @@ func errno(v error) uintptr {
 	return 0
 }
 
-//go:linkname h2ErrClosedBody golang.org/x/net/http2.errClosedBody
-var h2ErrClosedBody error //nolint:errname // this is an exported variable from golang.org/x/net/http2
-
-func init() {
-	if h2ErrClosedBody == nil {
-		panic("http2.errClosedBody not linked")
-	}
-}
+// h2ErrClosedBody is the text of the HTTP/2 server's unexported errClosedBody. Since Go 1.27,
+// golang.org/x/net/http2 wraps net/http's server, so the error can no longer be linked.
+const h2ErrClosedBody = "body closed by handler"
 
 // isClosedConnError reports whether err is an error from use of a closed network connection.
 func isClosedConnError(err error) bool {
@@ -55,8 +49,7 @@ func isClosedConnError(err error) bool {
 	if errors.Is(err, io.EOF) ||
 		errors.Is(err, io.ErrUnexpectedEOF) ||
 		errors.Is(err, syscall.ECONNABORTED) ||
-		errors.Is(err, syscall.ECONNRESET) ||
-		errors.Is(err, h2ErrClosedBody) {
+		errors.Is(err, syscall.ECONNRESET) {
 		return true
 	}
 
@@ -77,7 +70,8 @@ func isClosedConnError(err error) bool {
 		}
 	}
 
-	return strings.Contains(err.Error(), "use of closed network connection")
+	msg := err.Error()
+	return strings.Contains(msg, "use of closed network connection") || strings.Contains(msg, h2ErrClosedBody)
 }
 
 // isCloseable reports whether err is an error that indicates the client connection should be closed.
