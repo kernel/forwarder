@@ -1,6 +1,6 @@
 module gnet
 
-go 1.23.3
+go 1.27.3
 
 require (
 	github.com/evanphx/wildcat v0.0.0-20141114174135-e7012f664567
