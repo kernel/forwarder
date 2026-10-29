@@ -66,7 +66,7 @@ func (p *HelpFlagPrinter) PrintHelpFlag(flag *flag.Flag) {
 	wrappedStr = flagStr + "\n" + usage
 	appendTabStr := strings.ReplaceAll(wrappedStr, "\n", "\n\t")
 
-	fmt.Fprintf(p.out, appendTabStr+"\n\n")
+	fmt.Fprint(p.out, appendTabStr+"\n\n")
 }
 
 func (p *HelpFlagPrinter) replaceHTML(s string) string {
