@@ -36,9 +36,9 @@ func errno(v error) uintptr {
 	return 0
 }
 
-// h2ErrClosedBody is the text of the HTTP/2 server's unexported errClosedBody. Since Go 1.27,
+// h2ClosedBodyMsg is the text of the HTTP/2 server's unexported errClosedBody. Since Go 1.27,
 // golang.org/x/net/http2 wraps net/http's server, so the error can no longer be linked.
-const h2ErrClosedBody = "body closed by handler"
+const h2ClosedBodyMsg = "body closed by handler"
 
 // isClosedConnError reports whether err is an error from use of a closed network connection.
 func isClosedConnError(err error) bool {
@@ -71,7 +71,7 @@ func isClosedConnError(err error) bool {
 	}
 
 	msg := err.Error()
-	return strings.Contains(msg, "use of closed network connection") || strings.Contains(msg, h2ErrClosedBody)
+	return strings.Contains(msg, "use of closed network connection") || strings.Contains(msg, h2ClosedBodyMsg)
 }
 
 // isCloseable reports whether err is an error that indicates the client connection should be closed.

@@ -37,7 +37,7 @@ func (p *MarkdownFlagPrinter) PrintHelpFlag(f *pflag.Flag) {
 	body = withMarkdownLinks(body)
 
 	fmt.Fprint(p.out, body)
-	fmt.Fprintf(p.out, "\n\n")
+	fmt.Fprint(p.out, "\n\n")
 }
 
 func (p *MarkdownFlagPrinter) replaceHTML(s string) string {
